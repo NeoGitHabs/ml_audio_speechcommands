@@ -35,8 +35,12 @@ class CheckAudio(nn.Module):
         audio = self.second(audio)
         return audio
 
-labels = torch.load('label.pth')
+from labels import labels
+# labels = torch.load('label.pth')
+labels = labels
 index_to_labels = {ind:lab for ind, lab in enumerate(labels)}
+print(f'index_to_labels: {index_to_labels}')
+print(f'Total labels: {len(index_to_labels)}')
 
 model = CheckAudio()
 
@@ -55,6 +59,7 @@ def change_audio(waveform, sample_rate):
     if sample_rate != 16000:
         new_sr = transforms.Resample(orig_freq=sample_rate, new_freq=16000)
         new_sr(torch.tensor(waveform))
+        waveform = new_sr(waveform)  # <- добавьте присваивание
     spec = transform(waveform).squeeze(0)
     if spec.shape[1] > max_len:
         spec = spec[:, :max_len]
@@ -72,16 +77,21 @@ async def predict_audio(file:UploadFile = File(...,)):
             raise HTTPExeption(status_code=400, detail='File Not Found')
 
     except Exception as e:
-        raise HTTPExeption(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
     waveform, sample_rate = sf.read(io.BytesIO(audio), dtype='float32')
-    waveform = torch.tensor(waveform).T
+    # waveform = torch.tensor(waveform).mT
+    waveform = torch.tensor(waveform)
+    if waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.dim() == 2:
+        waveform = waveform.mT
     spectogramma = change_audio(waveform, sample_rate).unsqueeze(0).to(device)
 
     with torch.no_grad():
         y_prediction = model(spectogramma)
         prediction_ind = torch.argmax(y_prediction, dim=1).item()
         class_name = index_to_labels[prediction_ind]
-        return {f'Class number: {prediction_ind}', f'Class name: {class_name}'}
+        return {f'Class number: {prediction_ind}, Class name: {class_name}'}
 
 if __name__ == '__main__':
     uvicorn.run(app, host='127.0.0.1', port=8000)
