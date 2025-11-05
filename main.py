@@ -1,97 +1,112 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from numpy.conftest import dtype
-from torchaudio import transforms
-import torch.nn.functional as F
-import torch.optim as optim
-import soundfile as sf
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from torchvision import transforms
+import torchaudio.transforms as T
+import streamlit as st
+from PIL import Image
 import torch.nn as nn
+import torchaudio
+import librosa
+import numpy as np
 import uvicorn
+import tempfile
 import torch
 import io
+import os
 
+
+classes = ['blues', 'classical', 'country', 'disco', 'hiphop', 'jazz', 'metal', 'pop', 'reggae', 'rock']
+
+transform = T.MelSpectrogram(
+     sample_rate = 22050,
+     n_mels = 64
+)
 
 class CheckAudio(nn.Module):
-    def __init__(self,):
+    def __init__(self):
         super().__init__()
         self.first = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
-
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(16, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.AdaptiveAvgPool2d((8, 8))
         )
         self.second = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(32 * 8 * 8, 128),
+            nn.Linear(64 * 8 * 8, 128),
             nn.ReLU(),
-            nn.Linear(128, 35)
+            nn.Linear(128, 10)
         )
+
     def forward(self, audio):
         audio = audio.unsqueeze(1)
         audio = self.first(audio)
         audio = self.second(audio)
         return audio
 
-from labels import labels
-# labels = torch.load('label.pth')
-labels = labels
-index_to_labels = {ind:lab for ind, lab in enumerate(labels)}
-print(f'index_to_labels: {index_to_labels}')
-print(f'Total labels: {len(index_to_labels)}')
-
-model = CheckAudio()
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model.load_state_dict(torch.load('audio_model.pth', map_location=device))
+model = CheckAudio()
+model.load_state_dict(torch.load('audioGTZAN.pth', map_location=device))
 model.to(device)
 model.eval()
 
-transform = transforms.MelSpectrogram(
-    sample_rate=16000,
-    n_mels=64
-)
+st.title('Audio Genre Classifier')
+st.text('Загрузите аудио, и модель попробует её распознать.')
 
-max_len = 100
-def change_audio(waveform, sample_rate):
-    if sample_rate != 16000:
-        new_sr = transforms.Resample(orig_freq=sample_rate, new_freq=16000)
-        new_sr(torch.tensor(waveform))
-        waveform = new_sr(waveform)  # <- добавьте присваивание
-    spec = transform(waveform).squeeze(0)
-    if spec.shape[1] > max_len:
-        spec = spec[:, :max_len]
-    if spec.shape[1] < max_len:
-        count_len = max_len - spec.shape[1]
-        spec = F.pad(spec, (0, count_len))
-    return spec
+mnist_audio = st.file_uploader('Выберите аудио', type=['wav', 'mp3', 'flac', 'ogg'])
 
-app = FastAPI()
-@app.post('/predict/')
-async def predict_audio(file:UploadFile = File(...,)):
-    try:
-        audio = await file.read()
-        if not audio:
-            raise HTTPExeption(status_code=400, detail='File Not Found')
+if not mnist_audio:
+    st.info('Загрузите аудио')
+else:
+    st.audio(mnist_audio)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    waveform, sample_rate = sf.read(io.BytesIO(audio), dtype='float32')
-    # waveform = torch.tensor(waveform).mT
-    waveform = torch.tensor(waveform)
-    if waveform.dim() == 1:
-        waveform = waveform.unsqueeze(0)
-    elif waveform.dim() == 2:
-        waveform = waveform.mT
-    spectogramma = change_audio(waveform, sample_rate).unsqueeze(0).to(device)
+    if st.button('Распознать'):
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                tmp_file.write(mnist_audio.read())
+                tmp_path = tmp_file.name
 
-    with torch.no_grad():
-        y_prediction = model(spectogramma)
-        prediction_ind = torch.argmax(y_prediction, dim=1).item()
-        class_name = index_to_labels[prediction_ind]
-        return {f'Class number: {prediction_ind}, Class name: {class_name}'}
+            waveform, sample_rate = librosa.load(tmp_path, sr=22050)
+            waveform = torch.from_numpy(waveform).unsqueeze(0)
+            os.unlink(tmp_path)
 
-if __name__ == '__main__':
-    uvicorn.run(app, host='127.0.0.1', port=8000)
+            mel_spec = transform(waveform)
+            mel_spec = mel_spec.mean(dim=0) if mel_spec.dim() == 3 else mel_spec
+            mel_spec = mel_spec.unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                y_prediction = model(mel_spec)
+                prediction = y_prediction.argmax(dim=1).item()
+
+            st.success(f'Модель думает, что это: {classes[prediction]}')
+
+        except Exception as e:
+            st.error(f'Ошибка: {str(e)}')
+
+
+
+
+# app = FastAPI()
+#
+# @app.post('/predict')
+# async def check_image(file:UploadFile = File(...)):
+#     try:
+#         data = await file.read()
+#         if not data:
+#             raise HTTPException(status_code=400, detail='File not Found')
+#
+#         img = Image.open(io.BytesIO(data))
+#         img_tensor = transform(img).unsqueeze(0).to(device)
+#
+#         with torch.no_grad():
+#             prediction = model(img_tensor)
+#             result = prediction.argmax(dim=1).item()
+#             return {f'class': classes[result]}
+#
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f'{e}')
+#
+# if __name__ == '__main__':
+#     uvicorn.run(app, host='127.0.0.1', port=8000)
